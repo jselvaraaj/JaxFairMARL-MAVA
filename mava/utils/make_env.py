@@ -37,6 +37,8 @@ from jumanji.environments.routing.robot_warehouse.generator import (
 )
 from omegaconf import DictConfig
 
+from mava.environments.jaxmarlfairspread import JaxMarlFairSpread
+from mava.environments.jaxmarlfairspreadgraphwrapper import FairMPEAssignmentGraphWrapper
 from mava.types import MarlEnv
 from mava.utils.network_utils import is_gnn_based
 from mava.wrappers import (
@@ -83,6 +85,7 @@ _jaxmarl_registry: registry_type = {
     "Smax": {"wrapper": SmaxWrapper},
     "MaBrax": {"wrapper": MabraxWrapper},
     "MPE": {"wrapper": MPEWrapper, "graph_wrapper": MPEGraphWrapper},
+    "FairMPEAssignment": {"wrapper": MPEWrapper, "graph_wrapper": FairMPEAssignmentGraphWrapper},
 }
 _gigastep_registry: registry_type = {"Gigastep": {"wrapper": GigastepWrapper}}
 
@@ -172,13 +175,21 @@ def make_jaxmarl_env(config: DictConfig, add_global_state: bool = False) -> Tupl
     elif "mpe" in config.env.env_name.lower():
         kwargs.update(config.env.scenario.task_config)
 
+    env_factory = jaxmarl.make
+    if "fair" in config.env.env_name.lower():
+
+        def make_fair(env_id: str, **env_kwargs):
+            return JaxMarlFairSpread(**env_kwargs)
+
+        env_factory = make_fair
+
     # Create jaxmarl envs.
     train_env: MarlEnv = _jaxmarl_registry[config.env.env_name]["wrapper"](
-        jaxmarl.make(config.env.scenario.name, **kwargs),
+        env_factory(config.env.scenario.name, **kwargs),
         add_global_state,
     )
     eval_env: MarlEnv = _jaxmarl_registry[config.env.env_name]["wrapper"](
-        jaxmarl.make(config.env.scenario.name, **kwargs),
+        env_factory(config.env.scenario.name, **kwargs),
         add_global_state,
     )
 
