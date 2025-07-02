@@ -1,4 +1,5 @@
 import jax.numpy as jnp
+from einops import rearrange
 
 from mava.environments.jaxmarlfairspread import FairSpreadState
 from mava.types import GraphsTuple
@@ -14,7 +15,7 @@ class FairMPEAssignmentGraphWrapper(MPEGraphWrapper):
     ):
         super().__init__(env, add_self_loops, visibility_radius)
 
-        self.node_features_dim = 2 + 2 + 1
+        self.node_features_dim = 2 + 2 + 1 + 4 + 2
 
     def visibility_graph_for_ego(
         self,
@@ -52,11 +53,18 @@ class FairMPEAssignmentGraphWrapper(MPEGraphWrapper):
         # for invalid edges, edge feature would be 0.0
         edge_features = safe_dists[safe_senders, safe_receivers][..., None]
 
+        nearest_landmark_idx = self.num_agents + state.nearest_landmark_idx
+
         agent_node_features = jnp.concatenate(
             [
-                (state.p_pos[state.assignment] - state.p_pos[ego_idx]),
-                (state.p_vel[state.assignment] - state.p_vel[ego_idx]),
+                state.p_pos[state.assignment] - state.p_pos[ego_idx][None],
+                state.p_vel[state.assignment] - state.p_vel[ego_idx][None],
                 state.landmark_occupancy_flag[state.assignment][..., None],
+                rearrange(
+                    state.p_pos[nearest_landmark_idx] - state.p_pos[ego_idx][None, None],
+                    "agents goals coords -> agents (goals coords)",
+                ),
+                state.landmark_occupancy_flag[nearest_landmark_idx],
             ],
             axis=-1,
         )

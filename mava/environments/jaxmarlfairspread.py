@@ -17,6 +17,7 @@ class FairSpreadState(SimpleMPEState):
     # Indexed by agent index, the value is the assigned landmark index.
     assignment: Optional[chex.Array] = None
     landmark_occupancy_flag: Optional[chex.Array] = None
+    nearest_landmark_idx: Optional[chex.Array] = None
 
 
 class JaxMarlFairSpread(SimpleSpreadMPE):
@@ -41,8 +42,9 @@ class JaxMarlFairSpread(SimpleSpreadMPE):
             **kwargs,
         )
 
-        # The new observation space includes the relative position to the assigned landmark (2,).
-        new_obs_size = 2 + 2 + 3
+        # The new observation space includes:
+        # velocity (2) + position (2) + assigned landmark info (3) + two nearest landmarks info (6)
+        new_obs_size = 2 + 2 + 3 + 6
         self.observation_spaces = {
             agent: Box(-jnp.inf, jnp.inf, (new_obs_size,)) for agent in self.agents
         }
@@ -71,9 +73,29 @@ class JaxMarlFairSpread(SimpleSpreadMPE):
             step=0,
             assignment=assignment,
         )
-        state = state.replace(landmark_occupancy_flag=self.get_occupancy_flag(state))
+        state = state.replace(
+            landmark_occupancy_flag=self.get_occupancy_flag(state),
+            nearest_landmark_idx=self.get_two_nearest_landmarks_idx(state),
+        )
 
         return self.get_obs(state), state
+
+    def get_two_nearest_landmarks_idx(self, state: FairSpreadState) -> chex.Array:
+        @partial(jax.vmap, in_axes=(None, 0))
+        def _get_two_nearest_landmarks_idx(state: FairSpreadState, aidx: int) -> chex.Array:
+            agent_pos = state.p_pos[aidx]
+            landmark_positions = state.p_pos[self.num_agents :]  # All landmark positions
+
+            # Compute distances to all landmarks
+            distances = jnp.linalg.norm(landmark_positions - agent_pos, axis=1)
+
+            # Get indices of two nearest landmarks
+            nearest_indices = jnp.argsort(distances)[:2]
+
+            return nearest_indices
+
+        nearest_landmark_idx = _get_two_nearest_landmarks_idx(state, self.agent_range)
+        return nearest_landmark_idx  # (num_agents, 2)
 
     def get_obs(self, state: FairSpreadState) -> Dict[str, chex.Array]:
         @partial(jax.vmap, in_axes=(0,))
@@ -84,15 +106,29 @@ class JaxMarlFairSpread(SimpleSpreadMPE):
             landmark_occupancy_flag = state.landmark_occupancy_flag[assigned_landmark_idx]
             return relative_pos, landmark_occupancy_flag
 
-        landmark_pos, landmark_occupancy_flag = _get_assigned_landmark_info(self.agent_range)
+        assigned_landmark_pos, assigned_landmark_occupancy_flag = _get_assigned_landmark_info(
+            self.agent_range
+        )
+
+        landmark_positions = state.p_pos[self.num_agents :]  # All landmark positions
+
+        nearest_landmark_idx = self.get_two_nearest_landmarks_idx(state)
+
+        # Get relative positions and occupancy flags for the two nearest landmarks
+        nearest_landmark_pos = (
+            landmark_positions[nearest_landmark_idx] - state.p_pos[self.agent_range][..., None, :]
+        )
+        nearest_landmark_flags = state.landmark_occupancy_flag[nearest_landmark_idx]
 
         def _obs(aidx: int) -> chex.Array:
             return jnp.concatenate(
                 [
                     state.p_vel[aidx].flatten(),  # 2
                     state.p_pos[aidx].flatten(),  # 2
-                    landmark_pos[aidx].flatten(),  # 2
-                    landmark_occupancy_flag[aidx].flatten(),  # 1
+                    assigned_landmark_pos[aidx].flatten(),  # 2
+                    assigned_landmark_occupancy_flag[aidx].flatten(),  # 1
+                    nearest_landmark_pos[aidx].flatten(),  # 4 (2 landmarks × 2 coords)
+                    nearest_landmark_flags[aidx].flatten(),  # 2 (2 landmarks × 1 flag)
                 ]
             )
 
@@ -176,6 +212,9 @@ class JaxMarlFairSpread(SimpleSpreadMPE):
             step=next_mpe_state.step,
             assignment=state.assignment,
         )
-        next_state = next_state.replace(landmark_occupancy_flag=self.get_occupancy_flag(next_state))
+        next_state = next_state.replace(
+            landmark_occupancy_flag=self.get_occupancy_flag(next_state),
+            nearest_landmark_idx=self.get_two_nearest_landmarks_idx(next_state),
+        )
 
         return self.get_obs(next_state), next_state, rewards, dones, info
