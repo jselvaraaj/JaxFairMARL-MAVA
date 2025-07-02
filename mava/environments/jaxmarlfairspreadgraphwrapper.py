@@ -14,7 +14,7 @@ class FairMPEAssignmentGraphWrapper(MPEGraphWrapper):
     ):
         super().__init__(env, add_self_loops, visibility_radius)
 
-        self.node_features_dim = 4
+        self.node_features_dim = 2 + 2 + 1
 
     def visibility_graph_for_ego(
         self,
@@ -52,13 +52,17 @@ class FairMPEAssignmentGraphWrapper(MPEGraphWrapper):
         # for invalid edges, edge feature would be 0.0
         edge_features = safe_dists[safe_senders, safe_receivers][..., None]
 
-        node_features = jnp.concatenate(
+        agent_node_features = jnp.concatenate(
             [
-                state.p_pos[state.assignment] - state.p_pos[ego_idx],
-                state.p_vel[state.assignment] - state.p_vel[ego_idx],
+                (state.p_pos[state.assignment] - state.p_pos[ego_idx]),
+                (state.p_vel[state.assignment] - state.p_vel[ego_idx]),
+                state.landmark_occupancy_flag[state.assignment][..., None],
             ],
             axis=-1,
         )
+        landmark_node_features = jnp.zeros_like(agent_node_features)
+
+        node_features = jnp.concatenate([agent_node_features, landmark_node_features], axis=-2)
         assert node_features.shape[-1] == self.node_features_dim, (
             f"Node features dim specified in FairMPEAssignmentGraphWrapper is "
             f"{self.node_features_dim}, but got {node_features.shape[-1]} for agent {ego_idx}."

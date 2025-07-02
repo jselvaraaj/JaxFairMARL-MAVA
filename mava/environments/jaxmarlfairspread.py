@@ -16,6 +16,7 @@ class FairSpreadState(SimpleMPEState):
 
     # Indexed by agent index, the value is the assigned landmark index.
     assignment: Optional[chex.Array] = None
+    landmark_occupancy_flag: Optional[chex.Array] = None
 
 
 class JaxMarlFairSpread(SimpleSpreadMPE):
@@ -41,10 +42,12 @@ class JaxMarlFairSpread(SimpleSpreadMPE):
         )
 
         # The new observation space includes the relative position to the assigned landmark (2,).
-        new_obs_size = 2 * 3
+        new_obs_size = 2 + 2 + 3
         self.observation_spaces = {
             agent: Box(-jnp.inf, jnp.inf, (new_obs_size,)) for agent in self.agents
         }
+
+        self.landmark_occupancy_flag_threshold = 0.5
 
     def reset(self, key: chex.PRNGKey) -> Tuple[Dict[str, chex.Array], FairSpreadState]:
         """Reset the environment."""
@@ -68,6 +71,7 @@ class JaxMarlFairSpread(SimpleSpreadMPE):
             step=0,
             assignment=assignment,
         )
+        state = state.replace(landmark_occupancy_flag=self.get_occupancy_flag(state))
 
         return self.get_obs(state), state
 
@@ -77,9 +81,10 @@ class JaxMarlFairSpread(SimpleSpreadMPE):
             assigned_landmark_idx = state.assignment[aidx]
             landmark_pos = state.p_pos[self.num_agents + assigned_landmark_idx]
             relative_pos = landmark_pos - state.p_pos[aidx]
-            return relative_pos
+            landmark_occupancy_flag = state.landmark_occupancy_flag[assigned_landmark_idx]
+            return relative_pos, landmark_occupancy_flag
 
-        landmark_pos = _get_assigned_landmark_info(self.agent_range)
+        landmark_pos, landmark_occupancy_flag = _get_assigned_landmark_info(self.agent_range)
 
         def _obs(aidx: int) -> chex.Array:
             return jnp.concatenate(
@@ -87,6 +92,7 @@ class JaxMarlFairSpread(SimpleSpreadMPE):
                     state.p_vel[aidx].flatten(),  # 2
                     state.p_pos[aidx].flatten(),  # 2
                     landmark_pos[aidx].flatten(),  # 2
+                    landmark_occupancy_flag[aidx].flatten(),  # 1
                 ]
             )
 
@@ -128,6 +134,28 @@ class JaxMarlFairSpread(SimpleSpreadMPE):
         }
         return rewards
 
+    def get_occupancy_flag(self, state: FairSpreadState) -> chex.Array:
+        """Get occupancy flag for each landmark."""
+        # Get agent and landmark positions
+        agent_pos = state.p_pos[: self.num_agents]  # (num_agents, 2)
+        landmark_pos = state.p_pos[self.num_agents :]  # (num_landmarks, 2)
+
+        # Calculate distance matrix: agent-to-landmark distances
+        dist_matrix = jnp.linalg.norm(
+            agent_pos[:, None, :] - landmark_pos[None, :, :], axis=-1
+        )  # (num_agents, num_landmarks)
+
+        normalized_landmark_coverage = (
+            jnp.clip(
+                jnp.min(dist_matrix, axis=0),  # (num_landmarks,)
+                0,
+                self.landmark_occupancy_flag_threshold,
+            )
+            / self.landmark_occupancy_flag_threshold
+        )
+        occupancy_flag = 1 - normalized_landmark_coverage
+        return occupancy_flag
+
     def step_env(
         self, key: chex.PRNGKey, state: FairSpreadState, actions: Dict[str, chex.Array]
     ) -> Tuple[Dict[str, chex.Array], FairSpreadState, Dict[str, float], Dict[str, bool], Dict]:
@@ -148,5 +176,6 @@ class JaxMarlFairSpread(SimpleSpreadMPE):
             step=next_mpe_state.step,
             assignment=state.assignment,
         )
+        next_state = next_state.replace(landmark_occupancy_flag=self.get_occupancy_flag(next_state))
 
         return self.get_obs(next_state), next_state, rewards, dones, info
