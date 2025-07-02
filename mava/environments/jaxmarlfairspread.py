@@ -5,6 +5,7 @@ from typing import Dict, Optional, Tuple
 import chex
 import jax
 import jax.numpy as jnp
+import optax
 from flax import struct
 from jaxmarl.environments.mpe.simple import State as SimpleMPEState
 from jaxmarl.environments.mpe.simple_spread import SimpleSpreadMPE
@@ -40,7 +41,7 @@ class JaxMarlFairSpread(SimpleSpreadMPE):
         self,
         num_agents: int = 3,
         num_landmarks: int = 3,
-        assignment_strategy: AssignmentStrategy = AssignmentStrategy.RANDOM,
+        assignment_strategy: AssignmentStrategy = AssignmentStrategy.OPTIMAL,
         **kwargs,
     ) -> None:
         """Initialise the environment."""
@@ -67,7 +68,16 @@ class JaxMarlFairSpread(SimpleSpreadMPE):
         if self.assignment_strategy == AssignmentStrategy.RANDOM:
             assignment = jax.random.permutation(key, jnp.arange(self.num_landmarks))
         elif self.assignment_strategy == AssignmentStrategy.OPTIMAL:
-            pass
+            agent_pos = state.p_pos[: self.num_agents]  # (num_agents, 2)
+            landmark_pos = state.p_pos[self.num_agents :]  # (num_landmarks, 2)
+            # Create cost matrix where costs[i, j] = distance from agent i to landmark j
+            costs = jnp.linalg.norm(agent_pos[:, None, :] - landmark_pos[None, :, :], axis=-1)
+
+            agent_idx, landmark_idx = optax.assignment.hungarian_algorithm(costs)
+            # Create assignment array where assignment[i] = landmark assigned to agent i
+            assignment = jnp.zeros(self.num_agents, dtype=jnp.int32)
+            assignment = assignment.at[agent_idx].set(landmark_idx)
+
         elif self.assignment_strategy == AssignmentStrategy.FAIR:
             pass
         return assignment
