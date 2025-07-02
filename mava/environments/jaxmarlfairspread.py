@@ -1,3 +1,4 @@
+from enum import Enum
 from functools import partial
 from typing import Dict, Optional, Tuple
 
@@ -8,6 +9,14 @@ from flax import struct
 from jaxmarl.environments.mpe.simple import State as SimpleMPEState
 from jaxmarl.environments.mpe.simple_spread import SimpleSpreadMPE
 from jaxmarl.environments.spaces import Box
+
+
+class AssignmentStrategy(Enum):
+    """Assignment strategy for JaxMarlFairSpread."""
+
+    RANDOM = "random"
+    OPTIMAL = "optimal"
+    FAIR = "fair"
 
 
 @struct.dataclass
@@ -31,6 +40,7 @@ class JaxMarlFairSpread(SimpleSpreadMPE):
         self,
         num_agents: int = 3,
         num_landmarks: int = 3,
+        assignment_strategy: AssignmentStrategy = AssignmentStrategy.RANDOM,
         **kwargs,
     ) -> None:
         """Initialise the environment."""
@@ -44,12 +54,23 @@ class JaxMarlFairSpread(SimpleSpreadMPE):
 
         # The new observation space includes:
         # velocity (2) + position (2) + assigned landmark info (3) + two nearest landmarks info (6)
-        new_obs_size = 2 + 2 + 3 + 6
+        new_obs_size = 2 + 2 + 6
         self.observation_spaces = {
             agent: Box(-jnp.inf, jnp.inf, (new_obs_size,)) for agent in self.agents
         }
 
         self.landmark_occupancy_flag_threshold = 0.5
+        self.assignment_strategy = assignment_strategy
+
+    def get_new_assignment(self, key: chex.PRNGKey, state: FairSpreadState) -> chex.Array:
+        """Get assignment for each agent."""
+        if self.assignment_strategy == AssignmentStrategy.RANDOM:
+            assignment = jax.random.permutation(key, jnp.arange(self.num_landmarks))
+        elif self.assignment_strategy == AssignmentStrategy.OPTIMAL:
+            pass
+        elif self.assignment_strategy == AssignmentStrategy.FAIR:
+            pass
+        return assignment
 
     def reset(self, key: chex.PRNGKey) -> Tuple[Dict[str, chex.Array], FairSpreadState]:
         """Reset the environment."""
@@ -63,17 +84,16 @@ class JaxMarlFairSpread(SimpleSpreadMPE):
             ]
         )
 
-        assignment = jax.random.permutation(key_assign, jnp.arange(self.num_landmarks))
-
         state = FairSpreadState(
             p_pos=p_pos,
             p_vel=jnp.zeros((self.num_entities, self.dim_p)),
             c=jnp.zeros((self.num_agents, self.dim_c)),
             done=jnp.full((self.num_agents), False),
             step=0,
-            assignment=assignment,
         )
+        assignment = self.get_new_assignment(key_assign, state)
         state = state.replace(
+            assignment=assignment,
             landmark_occupancy_flag=self.get_occupancy_flag(state),
             nearest_landmark_idx=self.get_two_nearest_landmarks_idx(state),
         )
@@ -125,8 +145,6 @@ class JaxMarlFairSpread(SimpleSpreadMPE):
                 [
                     state.p_vel[aidx].flatten(),  # 2
                     state.p_pos[aidx].flatten(),  # 2
-                    assigned_landmark_pos[aidx].flatten(),  # 2
-                    assigned_landmark_occupancy_flag[aidx].flatten(),  # 1
                     nearest_landmark_pos[aidx].flatten(),  # 4 (2 landmarks × 2 coords)
                     nearest_landmark_flags[aidx].flatten(),  # 2 (2 landmarks × 1 flag)
                 ]
@@ -212,7 +230,14 @@ class JaxMarlFairSpread(SimpleSpreadMPE):
             step=next_mpe_state.step,
             assignment=state.assignment,
         )
+
+        if self.assignment_strategy != AssignmentStrategy.RANDOM:
+            assignment = self.get_new_assignment(key, next_state)
+        else:
+            assignment = next_state.assignment
+
         next_state = next_state.replace(
+            assignment=assignment,
             landmark_occupancy_flag=self.get_occupancy_flag(next_state),
             nearest_landmark_idx=self.get_two_nearest_landmarks_idx(next_state),
         )
